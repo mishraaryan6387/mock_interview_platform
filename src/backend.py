@@ -1,20 +1,37 @@
-import requests
+import sys
+import os
+from pathlib import Path
 from io import BytesIO
 import wave
+import time
+import json
+import requests
 from dotenv import load_dotenv
-import os
-import utils
 from openai import OpenAI
 import pyaudio
 import speech_recognition as sr
-import time
-import json
+
+# Ensure project root is in sys.path
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+import utils
 
 load_dotenv()
-API_KEY = os.getenv("API_KEY")
-BASE_URL = os.getenv("BASE_URL")
-MODEL_NAME = os.getenv("MODEL_NAME")
+API_KEY = os.getenv("API_KEY") or "ollama"
+BASE_URL = os.getenv("BASE_URL") or "http://localhost:11434/v1/"
+MODEL_NAME = os.getenv("MODEL_NAME") or "llama3.2:latest"
 TTS_SERVER_URL = os.getenv("TTS_SERVER_URL", "http://localhost:5002")
+
+def get_openai_client(api_key=None, base_url=None):
+    """
+    Creates and returns an OpenAI client instance with safe fallbacks.
+    """
+    return OpenAI(
+        api_key=api_key or API_KEY,
+        base_url=base_url or BASE_URL
+    )
 
 def synthesize_text_to_audio(message, speaker_id="p230", style_wav="", language_id=""):
     """
@@ -60,46 +77,51 @@ def read_wav_parameters(audio_stream):
 
 def play_audio(audio_stream):
     """
-    Plays audio directly from an in-memory WAV audio stream.
+    Plays audio directly from an in-memory WAV audio stream with graceful error handling.
 
     Parameters:
         audio_stream (BytesIO): In-memory WAV audio file.
     """
-    # Reset stream position to the beginning
-    audio_stream.seek(0)
-    
-    # Initialize PyAudio
-    p = pyaudio.PyAudio()
-    
-    # Open the WAV file from the in-memory stream
-    with wave.open(audio_stream, "rb") as wav_file:
-        # Get audio parameters
-        channels = wav_file.getnchannels()
-        sample_width = wav_file.getsampwidth()
-        framerate = wav_file.getframerate()
+    if audio_stream is None:
+        return
+    try:
+        # Reset stream position to the beginning
+        audio_stream.seek(0)
         
-        # Create an output stream
-        stream = p.open(
-            format=p.get_format_from_width(sample_width),
-            channels=channels,
-            rate=framerate,
-            output=True
-        )
+        # Initialize PyAudio
+        p = pyaudio.PyAudio()
         
-        # Read and play audio in chunks to ensure smooth playback
-        chunk_size = 1024
-        data = wav_file.readframes(chunk_size)
-        
-        while data:
-            stream.write(data)
+        # Open the WAV file from the in-memory stream
+        with wave.open(audio_stream, "rb") as wav_file:
+            # Get audio parameters
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            framerate = wav_file.getframerate()
+            
+            # Create an output stream
+            stream = p.open(
+                format=p.get_format_from_width(sample_width),
+                channels=channels,
+                rate=framerate,
+                output=True
+            )
+            
+            # Read and play audio in chunks to ensure smooth playback
+            chunk_size = 1024
             data = wav_file.readframes(chunk_size)
             
-        # Clean up
-        stream.stop_stream()
-        stream.close()
-    
-    p.terminate()
-    print("Audio playback complete")
+            while data:
+                stream.write(data)
+                data = wav_file.readframes(chunk_size)
+                
+            # Clean up
+            stream.stop_stream()
+            stream.close()
+        
+        p.terminate()
+        print("Audio playback complete")
+    except Exception as e:
+        print(f"Audio playback warning (continuing without local speaker output): {e}")
 
 def save_wav_file(audio_stream, filename="output.wav"):
     """
@@ -117,7 +139,7 @@ def save_wav_file(audio_stream, filename="output.wav"):
 
 def init_cv_question_stream(cv, user_intro, client, model):
     user_prompt = """You are professional talent acquisition specialist conducting an interview for an AI role.
-    Your taks is to start a conversation with the candidate after he introduced himself.
+    Your task is to start a conversation with the candidate after he introduced himself.
     You have access to the candidate's CV so you can ask him about one or more of his projects/experiences.
     The question should be short and not boring.
     The text you will generate will be read by a text-to-speech engine, so you can add vocallized text if you want.
@@ -147,30 +169,33 @@ def record_and_transcribe():
     recognizer.pause_threshold = 2.0
     recognizer.non_speaking_duration = 1.0
 
-    with sr.Microphone() as source:
-        print("Adjusting for ambient noise... Please wait.")
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        print("Listening... Speak now!")
-        try:
-            audio = recognizer.listen(source)
-            text = recognizer.recognize_google(audio)
-            print(f"Recognized: {text}")
-            return text
-        except sr.WaitTimeoutError:
-            print("No speech detected.")
-            return ""
-        except sr.UnknownValueError:
-            print("Could not understand the audio.")
-            return ""
-        except sr.RequestError as e:
-            print(f"Speech recognition service error: {e}")
-            return ""
-
+    try:
+        with sr.Microphone() as source:
+            print("Adjusting for ambient noise... Please wait.")
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("Listening... Speak now!")
+            try:
+                audio = recognizer.listen(source)
+                text = recognizer.recognize_google(audio)
+                print(f"Recognized: {text}")
+                return text
+            except sr.WaitTimeoutError:
+                print("No speech detected.")
+                return ""
+            except sr.UnknownValueError:
+                print("Could not understand the audio.")
+                return ""
+            except sr.RequestError as e:
+                print(f"Speech recognition service error: {e}")
+                return ""
+    except Exception as e:
+        print(f"Microphone recording error: {e}")
+        return ""
 
 def stream_next_cv_question(client, model, cv, chat_history):
     user_prompt = """You are professional talent acquisition specialist conducting an interview for an AI role.
-    Your taks is to continue the conversation with the candidate after he answered the previous question.
-    Continue the conversation and do no begin a new one.
+    Your task is to continue the conversation with the candidate after he answered the previous question.
+    Continue the conversation and do not begin a new one.
     You have access to the candidate's CV so you can ask him about one or more of his projects/experiences.
     The question should be short and not boring.
     The question should not be long !
@@ -197,16 +222,33 @@ def stream_next_cv_question(client, model, cv, chat_history):
     )
     return response.choices[0].message.content
 
-def cv_interview():
+def cv_interview(pdf_file_path=None):
     try:
         chat_history = []
-        pdf_file_path = "CV/CV_ENG_9_2025_STAGE.pdf"  # Adjust to your CV path
+        if pdf_file_path is None:
+            # Check default path in project or CV directory
+            candidate_paths = [
+                BASE_DIR / "CV" / "CV_ENG_9_2025_STAGE.pdf",
+                Path("CV/CV_ENG_9_2025_STAGE.pdf"),
+            ]
+            for p in candidate_paths:
+                if p.exists():
+                    pdf_file_path = str(p)
+                    break
+
+        if not pdf_file_path or not os.path.exists(pdf_file_path):
+            print(f"Error: CV file not found at: {pdf_file_path}. Please provide a valid CV file path.")
+            return None, f"CV file not found: {pdf_file_path}"
+
         cv_text = utils.extract_text_from_pdf(pdf_file_path)
+        if not cv_text:
+            print("Error: Could not extract text from CV.")
+            return None, "Could not extract text from CV."
 
         intro = """Hello dear candidate, I am Josh, your virtual voice assistant for this AI role interview.
         Please introduce yourself briefly. If you stop talking for more than 5 seconds,
         I will assume you have finished your introduction."""
-        client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+        client = get_openai_client()
         model = MODEL_NAME
         
         # Synthesize and play the introduction
@@ -249,8 +291,10 @@ def cv_interview():
             chat_history.append({"role": "candidate", "content": next_answer})
             time.sleep(1)
         print("Interview complete.")  
+        return chat_history, None
     except Exception as e:
         print("Error during interview operation:", e)
+        return None, str(e)
 
 def reformulate_question(client, model, question_data):
     """
@@ -331,19 +375,24 @@ def generate_evaluation_report(client, model, interview_data):
     )
     return response.choices[0].message.content
 
-def technical_interview():
+def technical_interview(questions_file_path=None):
     try:
         chat_history = []
         interview_data = []  # To store questions and answers for final evaluation
 
-        with open("interview_questions.json") as f:
+        if questions_file_path is None:
+            questions_file_path = BASE_DIR / "interview_questions.json"
+            if not questions_file_path.exists():
+                questions_file_path = Path("interview_questions.json")
+
+        with open(questions_file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         intro = """Hello dear candidate, I am Josh, your virtual voice assistant for this technical interview for an AI role.
         I'll be asking you a series of technical questions to assess your knowledge and skills.
         Please answer each question as thoroughly as you can. I'll listen until you've finished speaking.
         Let's start with a brief introduction. Please tell me about your background in AI and machine learning."""
-        client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+        client = get_openai_client()
         model = MODEL_NAME
 
         # Synthesize and play the introduction
@@ -366,15 +415,15 @@ def technical_interview():
         # Select 2 easy, 2 medium, and 1 hard question
         selected_questions = []
         if easy_questions:
-            selected_questions.extend(easy_questions[:4])
+            selected_questions.extend(easy_questions[:2])
         if medium_questions:
-            selected_questions.extend(medium_questions[:3])
+            selected_questions.extend(medium_questions[:2])
         if hard_questions:
-            selected_questions.append(hard_questions[:2])
+            selected_questions.extend(hard_questions[:1])
         
         # Ensure we have at least one question
         if not selected_questions:
-            selected_questions = data[:3]  # Take first 3 questions if no difficulty categorization
+            selected_questions = data[:min(5, len(data))]
             
         # Ask each question and record the answer
         for i, question_data in enumerate(selected_questions):
@@ -424,14 +473,13 @@ def technical_interview():
         print(evaluation_report)
         
         # Save the report to a file
-        with open("interview_evaluation.txt", "w") as f:
+        report_file = BASE_DIR / "interview_evaluation.txt"
+        with open(report_file, "w", encoding="utf-8") as f:
             f.write(evaluation_report)
-        print("\nEvaluation report saved to 'interview_evaluation.txt'")
+        print(f"\nEvaluation report saved to '{report_file}'")
         
         return chat_history, evaluation_report
         
     except Exception as e:
         print(f"Error during technical interview: {e}")
         return None, str(e)
-
-

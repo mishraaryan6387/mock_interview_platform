@@ -1,8 +1,9 @@
 from PyPDF2 import PdfReader
 import re
 import speech_recognition as sr
-from io import StringIO
+from io import StringIO, BytesIO
 import os
+from pathlib import Path
 import tempfile
 import requests
 from pydub import AudioSegment
@@ -15,6 +16,8 @@ def clean_text(text: str) -> str:
     """
     Clean and format text from PDF.
     """
+    if not text:
+        return ""
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'\.(?=[A-Z])', '. ', text)
     text = re.sub(r',(?=[^\s])', ', ', text)
@@ -24,19 +27,30 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-def extract_text_from_pdf(pdf_path: str) -> str:
+def extract_text_from_pdf(pdf_source) -> str:
     """
-    Extract and clean text from a PDF file.
+    Extract and clean text from a PDF file (supports path string, Path, or file-like object).
     """
     try:
-        reader = PdfReader(pdf_path)
-        text_parts = []
+        if isinstance(pdf_source, (str, Path)):
+            if not os.path.exists(pdf_source):
+                print(f"Error: PDF file does not exist: {pdf_source}")
+                return ""
+            reader = PdfReader(str(pdf_source))
+        elif hasattr(pdf_source, "read") or hasattr(pdf_source, "getvalue"):
+            if hasattr(pdf_source, "seek"):
+                pdf_source.seek(0)
+            reader = PdfReader(pdf_source)
+        else:
+            reader = PdfReader(pdf_source)
 
+        text_parts = []
         for page in reader.pages:
             page_text = page.extract_text() or ""
             if page_text:
                 cleaned_text = clean_text(page_text)
-                text_parts.append(cleaned_text)
+                if cleaned_text:
+                    text_parts.append(cleaned_text)
 
         full_text = '\n\n'.join(text_parts)
         return clean_text(full_text)
@@ -47,7 +61,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
 def collect_user_speech(timeout: int = 10, phrase_timeout: int = 5):
     """
-    Collect user's speech with more robust error handling.
+    Collect user's speech with robust error handling.
     
     Args:
         timeout (int): Total time to listen for speech
@@ -58,25 +72,29 @@ def collect_user_speech(timeout: int = 10, phrase_timeout: int = 5):
     """
     recognizer = sr.Recognizer()
     
-    with sr.Microphone() as source:
-        print("Adjusting for ambient noise... Please wait.")
-        recognizer.adjust_for_ambient_noise(source, duration=1)
-        print("Listening... Speak now!")
+    try:
+        with sr.Microphone() as source:
+            print("Adjusting for ambient noise... Please wait.")
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("Listening... Speak now!")
 
-        try:
-            audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_timeout)
-            text = recognizer.recognize_google(audio)
-            print(f"Recognized: {text}")
-            return text
-        except sr.WaitTimeoutError:
-            print("No speech detected within the time limit.")
-            return ""
-        except sr.UnknownValueError:
-            print("Could not understand the audio.")
-            return ""
-        except sr.RequestError as e:
-            print(f"Speech recognition service error: {e}")
-            return ""
+            try:
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_timeout)
+                text = recognizer.recognize_google(audio)
+                print(f"Recognized: {text}")
+                return text
+            except sr.WaitTimeoutError:
+                print("No speech detected within the time limit.")
+                return ""
+            except sr.UnknownValueError:
+                print("Could not understand the audio.")
+                return ""
+            except sr.RequestError as e:
+                print(f"Speech recognition service error: {e}")
+                return ""
+    except Exception as e:
+        print(f"Microphone or audio capture error: {e}")
+        return ""
 
 def text_to_speech(text, speaker_id="p225"):
     """
@@ -91,17 +109,20 @@ def text_to_speech(text, speaker_id="p225"):
         "speaker_id": speaker_id
     }
     
-    response = requests.post(url, data=data)
-    
-    if response.status_code == 200:
-        # Create a temporary file to store the audio
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-            temp_file.write(response.content)
-            temp_path = temp_file.name
-        
-        return temp_path
-    else:
-        raise Exception(f"TTS request failed with status {response.status_code}: {response.text}")
+    try:
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            # Create a temporary file to store the audio
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_file.write(response.content)
+                temp_path = temp_file.name
+            
+            return temp_path
+        else:
+            raise Exception(f"TTS request failed with status {response.status_code}: {response.text}")
+    except Exception as e:
+        print(f"Error in text_to_speech: {e}")
+        raise
 
 def chunk_text_fixed_size(text, chunk_size=256):
     """Splits text into fixed-size chunks using StringIO"""
