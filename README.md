@@ -108,7 +108,6 @@ AIVA adopts a modern, decoupled client-server architecture:
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-![Screenshot from 2025-03-21 21-53-04](https://github.com/user-attachments/assets/a5e7d1aa-2f21-4674-8fa4-ec38b3839a66)
 
 ---
 
